@@ -1,17 +1,17 @@
 use bytes::{Buf, IntoBuf};
 use futures::{Async, Future, Poll};
-use h2;
 use http;
+use h2;
+use hyper::body::Payload;
 use std::marker::PhantomData;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 use tokio_timer::clock;
-use tower_h2::Body;
 
 use super::{event, NextId, Taps};
 use proxy::{
     self,
-    http::{client::Error, h1},
+    http::{Error, h1},
 };
 use svc;
 
@@ -91,8 +91,8 @@ where
         Response = http::Response<B>,
         Error = Error,
     >,
-    A: Body,
-    B: Body,
+    A: Payload<Error = h2::Error>,
+    B: Payload<Error = h2::Error>,
 {
     Layer {
         next_id,
@@ -110,8 +110,8 @@ where
         Response = http::Response<B>,
         Error = Error,
     >,
-    A: Body,
-    B: Body,
+    A: Payload<Error = h2::Error>,
+    B: Payload<Error = h2::Error>,
 {
     type Value = <Stack<T, M> as svc::Stack<T>>::Value;
     type Error = M::Error;
@@ -138,8 +138,8 @@ where
         Response = http::Response<B>,
         Error = Error,
     >,
-    A: Body,
-    B: Body,
+    A: Payload<Error = h2::Error>,
+    B: Payload<Error = h2::Error>,
 {
     type Value = Service<M::Value>;
     type Error = M::Error;
@@ -164,8 +164,8 @@ where
         Response = http::Response<B>,
         Error = Error,
     >,
-    A: Body,
-    B: Body,
+    A: Payload<Error = h2::Error>,
+    B: Payload<Error = h2::Error>,
 {
     type Request = http::Request<A>;
     type Response = http::Response<ResponseBody<B>>;
@@ -225,7 +225,7 @@ where
 
 impl<S, B> Future for ResponseFuture<S>
 where
-    B: Body,
+    B: Payload<Error = h2::Error>,
     S: svc::Service<Response = http::Response<B>, Error = Error>,
 {
     type Item = http::Response<ResponseBody<B>>;
@@ -265,7 +265,7 @@ where
 
 impl<S, B> ResponseFuture<S>
 where
-    B: Body,
+    B: Payload,
     S: svc::Service<Response = http::Response<B>, Error = Error>,
 {
     fn tap_err(&mut self, e: Error) -> Error {
@@ -285,7 +285,7 @@ where
                             response_open_at: now,
                             response_first_frame_at: None,
                             response_fail_at: now,
-                            error: e.reason().unwrap_or(h2::Reason::INTERNAL_ERROR),
+                            error: e.h2_reason(),
                             bytes_sent: 0,
                         },
                     ));
@@ -299,14 +299,15 @@ where
 
 // === RequestBody ===
 
-impl<B: Body> Body for RequestBody<B> {
-    type Data = <B::Data as IntoBuf>::Buf;
+impl<B: Payload<Error = h2::Error>> Payload for RequestBody<B> {
+    type Data = B::Data;
+    type Error = B::Error;
 
     fn is_end_stream(&self) -> bool {
         self.inner.is_end_stream()
     }
 
-    fn poll_data(&mut self) -> Poll<Option<Self::Data>, h2::Error> {
+    fn poll_data(&mut self) -> Poll<Option<Self::Data>, Self::Error> {
         let poll_frame = self.inner.poll_data().map_err(|e| self.tap_err(e));
         let frame = try_ready!(poll_frame).map(|f| f.into_buf());
 
@@ -324,7 +325,7 @@ impl<B: Body> Body for RequestBody<B> {
         Ok(Async::Ready(frame))
     }
 
-    fn poll_trailers(&mut self) -> Poll<Option<http::HeaderMap>, h2::Error> {
+    fn poll_trailers(&mut self) -> Poll<Option<http::HeaderMap>, Self::Error> {
         let trailers = try_ready!(self.inner.poll_trailers().map_err(|e| self.tap_err(e)));
         self.tap_eos(trailers.as_ref());
         Ok(Async::Ready(trailers))
@@ -389,7 +390,7 @@ impl<B> Drop for RequestBody<B> {
 
 // === ResponseBody ===
 
-impl<B: Body + Default> Default for ResponseBody<B> {
+impl<B: Payload + Default> Default for ResponseBody<B> {
     fn default() -> Self {
         let now = clock::now();
         Self {
@@ -405,14 +406,15 @@ impl<B: Body + Default> Default for ResponseBody<B> {
     }
 }
 
-impl<B: Body> Body for ResponseBody<B> {
-    type Data = <B::Data as IntoBuf>::Buf;
+impl<B: Payload<Error = h2::Error>> Payload for ResponseBody<B> {
+    type Data = B::Data;
+    type Error = B::Error;
 
     fn is_end_stream(&self) -> bool {
         self.inner.is_end_stream()
     }
 
-    fn poll_data(&mut self) -> Poll<Option<Self::Data>, h2::Error> {
+    fn poll_data(&mut self) -> Poll<Option<Self::Data>, Self::Error> {
         trace!("ResponseBody::poll_data");
         let poll_frame = self.inner.poll_data().map_err(|e| self.tap_err(e));
         let frame = try_ready!(poll_frame).map(|f| f.into_buf());
@@ -434,7 +436,7 @@ impl<B: Body> Body for ResponseBody<B> {
         Ok(Async::Ready(frame))
     }
 
-    fn poll_trailers(&mut self) -> Poll<Option<http::HeaderMap>, h2::Error> {
+    fn poll_trailers(&mut self) -> Poll<Option<http::HeaderMap>, Self::Error> {
         trace!("ResponseBody::poll_trailers");
         let trailers = try_ready!(self.inner.poll_trailers().map_err(|e| self.tap_err(e)));
         self.tap_eos(trailers.as_ref());
@@ -490,7 +492,7 @@ impl<B> ResponseBody<B> {
     }
 
     fn tap_err(&mut self, e: h2::Error) -> h2::Error {
-        trace!("ResponseBody::tap_err: {:?}", e);
+        trace!("ResponseBody::tap_err {:?}", e);
 
         if let Some(meta) = self.meta.take() {
             if let Some(t) = self.taps.take() {

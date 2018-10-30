@@ -2,6 +2,7 @@ use bytes;
 use futures::{self, future, Future, Poll};
 use h2;
 use http;
+use hyper;
 use indexmap::IndexSet;
 use std::net::SocketAddr;
 use std::thread;
@@ -478,9 +479,7 @@ where
     R::Value: Send + 'static,
     <R::Value as svc::Service>::Error: error::Error + Send + Sync + 'static,
     <R::Value as svc::Service>::Future: Send + 'static,
-    B: tower_h2::Body + Default + Send + 'static,
-    B::Data: Send,
-    <B::Data as ::bytes::IntoBuf>::Buf: Send,
+    B: hyper::body::Payload + Default + Send + 'static,
     G: GetOriginalDst + Send + 'static,
 {
     // Install the request open timestamp module at the very top of the

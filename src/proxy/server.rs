@@ -5,13 +5,12 @@ use hyper;
 use indexmap::IndexSet;
 use std::{error, fmt};
 use std::net::SocketAddr;
-use tower_h2;
 
 use Conditional;
 use drain;
-use svc::{Stack, Service, stack::StackNewService};
+use svc::{Stack, Service};
 use transport::{connect, tls, Connection, GetOriginalDst, Peek};
-use proxy::http::glue::{HttpBody, HttpBodyNewSvc, HyperServerSvc};
+use proxy::http::glue::{HttpBody, HyperServerSvc};
 use proxy::protocol::Protocol;
 use proxy::tcp;
 use super::Accept;
@@ -56,7 +55,7 @@ where
         Request = http::Request<HttpBody>,
         Response = http::Response<B>,
     >,
-    B: tower_h2::Body,
+    B: hyper::body::Payload,
     // Determines the original destination of an intercepted server socket.
     G: GetOriginalDst,
 {
@@ -200,9 +199,7 @@ where
     R::Value: 'static,
     <R::Value as Service>::Error: error::Error + Send + Sync + 'static,
     <R::Value as Service>::Future: Send + 'static,
-    B: tower_h2::Body + Default + Send + 'static,
-    B::Data: Send,
-    <B::Data as ::bytes::IntoBuf>::Buf: Send,
+    B: hyper::body::Payload + Default + Send + 'static,
     G: GetOriginalDst,
 {
 
@@ -287,7 +284,7 @@ where
             });
 
         let h1 = self.h1.clone();
-        let h2_settings = self.h2_settings.clone();
+        let _h2_settings = self.h2_settings.clone();
         let route = self.route.clone();
         let connect = self.connect.clone();
         let drain_signal = self.drain_signal.clone();
@@ -329,18 +326,27 @@ where
                     }),
                     Protocol::Http2 => Either::B({
                         trace!("detected HTTP/2");
-                        let new_service = StackNewService::new(route, source.clone());
-                        let h2 = tower_h2::Server::new(
-                            HttpBodyNewSvc::new(new_service),
-                            h2_settings,
-                            log_clone.executor(),
-                        );
-                        let serve = h2.serve_modified(io, move |r: &mut http::Request<()>| {
-                            r.extensions_mut().insert(source.clone());
-                        });
-                        drain_signal
-                            .watch(serve, |conn| conn.graceful_shutdown())
-                            .map_err(|e| trace!("h2 server error: {:?}", e))
+                            match route.make(&source) {
+                            Err(()) => Either::A({
+                                error!("failed to build HTTP/1 client");
+                                future::err(())
+                            }),
+                            Ok(s) => Either::B({
+                                let svc = HyperServerSvc::new(
+                                    s,
+                                    drain_signal.clone(),
+                                    log_clone.executor(),
+                                );
+                                let conn = h1
+                                    .serve_connection(io, svc);
+                                drain_signal
+                                    .watch(conn, |conn| {
+                                        conn.graceful_shutdown();
+                                    })
+                                    .map(|_| ())
+                                    .map_err(|e| trace!("http2 server error: {:?}", e))
+                            }),
+                        }
                     }),
                 }),
             });

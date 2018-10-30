@@ -1018,8 +1018,14 @@ fn http1_requests_without_host_have_unique_connections() {
     assert_eq!(inbound.connections(), 4);
 }
 
+// ignore: hyper's h2 support doesn't yet allow ensuring a connection
+// before sending a request, so trying the connection consumes the
+// Request.
+//
+// With the addition of general retries, this can be re-enabled (and
+// then also tested with h1).
 #[test]
-#[cfg_attr(not(feature = "flaky_tests"), ignore)]
+#[ignore]
 fn retry_reconnect_errors() {
     let _ = env_logger::try_init();
 

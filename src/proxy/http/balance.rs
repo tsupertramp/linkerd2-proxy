@@ -1,14 +1,14 @@
 extern crate tower_balance;
 extern crate tower_discover;
-extern crate tower_h2_balance;
+extern crate hyper_balance;
 
 use http;
 use std::time::Duration;
+use hyper::body::Payload;
 use self::tower_discover::Discover;
-use tower_h2::Body;
 
 pub use self::tower_balance::{choose::PowerOfTwoChoices, load::WithPeakEwma, Balance};
-pub use self::tower_h2_balance::{PendingUntilFirstData, PendingUntilFirstDataBody};
+pub use self::hyper_balance::{PendingUntilFirstData, PendingUntilFirstDataBody};
 
 use svc;
 
@@ -49,8 +49,8 @@ impl<T, M, A, B> svc::Layer<T, T, M> for Layer
 where
     M: svc::Stack<T> + Clone,
     M::Value: Discover<Request = http::Request<A>, Response = http::Response<B>>,
-    A: Body,
-    B: Body,
+    A: Payload,
+    B: Payload,
 {
     type Value = <Stack<M> as svc::Stack<T>>::Value;
     type Error = <Stack<M> as svc::Stack<T>>::Error;
@@ -70,8 +70,8 @@ impl<T, M, A, B> svc::Stack<T> for Stack<M>
 where
     M: svc::Stack<T> + Clone,
     M::Value: Discover<Request = http::Request<A>, Response = http::Response<B>>,
-    A: Body,
-    B: Body,
+    A: Payload,
+    B: Payload,
 {
     type Value = Balance<WithPeakEwma<M::Value, PendingUntilFirstData>, PowerOfTwoChoices>;
     type Error = M::Error;
